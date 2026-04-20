@@ -14,7 +14,7 @@
     th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
     tr { border-bottom: 1px solid #27272a; }
     .ledger-row:hover { background-color: #18181b; }
-    .prospective-row { font-style: italic; color: #bef575; }
+    .prospective-row { font-style: italic; color: #bef575; opacity: 0.85; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen">
@@ -159,8 +159,14 @@
 
       const sorted = [...allTxs].sort((a, b) => a.date - b.date);
 
+      // We anchor calculations from Current Balance (the value from the Ally UI)
+      // Transactions after "now" are added to current balance.
+      // Transactions before "now" are subtracted from current balance to find the "starting" point.
       let running = currentBalance;
-      const pastTxs = sorted.filter(tx => tx.date < Date.now());
+      const now = Date.now();
+      const pastTxs = sorted.filter(tx => tx.date < now);
+      const futureTxs = sorted.filter(tx => tx.date >= now);
+      
       pastTxs.forEach(tx => running -= tx.amount);
 
       let balanceMap = new Map();
@@ -175,8 +181,7 @@
       const displayRows = sorted.map(tx => {
         const bals = balanceMap.get(tx.id);
         const note = (tx.userNote || tx.description).split('~ Future Amount')[0].trim();
-        const isProspective = !tx.isHistorical;
-        return {...tx, beg: bals.beg, end: bals.end, displayNote: note, isProspective};
+        return {...tx, beg: bals.beg, end: bals.end, displayNote: note, isProspective: !tx.isHistorical};
       }).sort((a, b) => b.date - a.date);
 
       const tbody = document.getElementById('ledgerBody');
@@ -189,6 +194,7 @@
         const debit  = row.amount < 0 ? Math.abs(row.amount).toFixed(2) : '';
 
         const rowClass = row.isProspective ? 'prospective-row' : 'ledger-row';
+        const label = row.isProspective ? '<span class="text-[10px] bg-amber-900/40 text-amber-200 px-1.5 py-0.5 rounded mr-2 uppercase tracking-tighter">Prospective</span>' : '';
 
         return `
           <tr class="${rowClass}">
@@ -197,21 +203,96 @@
             <td class="text-right text-emerald-400">${credit}</td>
             <td class="text-right text-red-400">${debit}</td>
             <td class="text-right font-medium">$${row.end.toFixed(2)}</td>
-            <td>${row.displayNote}</td>
+            <td>${label}${row.displayNote}</td>
           </tr>`;
       }).join('');
     }
 
+    async function detectAndShowInLedger() {
+      // 1. Clear existing prospective items
+      const prospectiveIds = (await db.transactions.toArray())
+        .filter(tx => !tx.isHistorical)
+        .map(tx => tx.id);
+      await db.transactions.bulkDelete(prospectiveIds);
+
+      // 2. Analyze history
+      const history = await db.transactions.where('isHistorical').equals(1).toArray();
+      const groups = {};
+      
+      // Group by Description (Cleaned)
+      history.forEach(tx => {
+        const cleanDesc = tx.description.split('~')[0].trim();
+        if (!groups[cleanDesc]) groups[cleanDesc] = [];
+        groups[cleanDesc].push(tx);
+      });
+
+      const now = new Date();
+      const horizon = new Date();
+      horizon.setDate(horizon.getDate() + 35); // Look 35 days ahead
+      
+      const newProspective = [];
+
+      Object.keys(groups).forEach(desc => {
+        const txs = groups[desc].sort((a, b) => a.date - b.date);
+        if (txs.length < 2) return;
+
+        // Calculate average interval in days
+        let totalDays = 0;
+        for (let i = 1; i < txs.length; i++) {
+          totalDays += (txs[i].date - txs[i-1].date) / (1000 * 60 * 60 * 24);
+        }
+        const avgInterval = totalDays / (txs.length - 1);
+        
+        // Match common patterns
+        let patternDays = 0;
+        if (avgInterval >= 25 && avgInterval <= 32) patternDays = 30; // Monthly
+        else if (avgInterval >= 12 && avgInterval <= 16) patternDays = 14; // Bi-weekly
+        else if (avgInterval >= 6 && avgInterval <= 8) patternDays = 7;   // Weekly
+
+        if (patternDays > 0) {
+          const lastTx = txs[txs.length - 1];
+          let nextDate = new Date(lastTx.date);
+          
+          // Project forward until we hit the horizon
+          while (nextDate.getTime() <= horizon.getTime()) {
+            if (patternDays === 30) {
+              nextDate.setMonth(nextDate.getMonth() + 1);
+            } else {
+              nextDate.setDate(nextDate.getDate() + patternDays);
+            }
+
+            if (nextDate.getTime() > now.getTime() && nextDate.getTime() <= horizon.getTime()) {
+              newProspective.push({
+                date: nextDate.getTime(),
+                amount: lastTx.amount,
+                description: desc,
+                userNote: `Recurring: ${desc}`,
+                isHistorical: false
+              });
+            }
+          }
+        }
+      });
+
+      if (newProspective.length > 0) {
+        await db.transactions.bulkAdd(newProspective);
+        alert(`Detected and added ${newProspective.length} prospective transactions for the next month.`);
+      } else {
+        alert("No clear recurring patterns detected in history.");
+      }
+
+      await loadData();
+    }
+
     function showSetBalanceModal() {
       const modal = document.getElementById('modal');
-      // Set to current balance or $0.00 if zero.
       const initialValue = currentBalance > 0 ? `$${currentBalance.toFixed(2)}` : '$0.00';
       
       modal.innerHTML = `
-        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4">
-          <h2 class="text-2xl mb-6">Set Current Balance (from Ally)</h2>
+        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4 text-zinc-100">
+          <h2 class="text-2xl mb-6">Set Current Balance</h2>
           <input id="balanceInput" type="text" value="${initialValue}" 
-                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-400 focus:not-italic focus:text-white outline-none"
+                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-500 focus:not-italic focus:text-white outline-none"
                  oninput="formatCurrencyInput(this)"
                  onfocus="if(this.value==='$0.00') this.value=''">
           <div class="flex gap-3 mt-8">
@@ -225,36 +306,27 @@
     }
 
     function formatCurrencyInput(input) {
-      // Remove any non-digit characters
       let digits = input.value.replace(/\D/g, '');
-      
       if (digits.length === 0) {
         input.value = '';
         return;
       }
-
-      // Convert to number and back to fixed decimal string
       let numericValue = (parseInt(digits) / 100).toFixed(2);
       input.value = `$${numericValue}`;
-      
-      // Remove italics once user starts typing valid numbers
-      input.classList.remove('italic', 'text-zinc-400');
+      input.classList.remove('italic', 'text-zinc-500');
     }
 
     function saveCurrentBalance() {
       const inputVal = document.getElementById('balanceInput').value;
-      // Strip dollar sign and commas to parse
       const cleanVal = inputVal.replace(/[$,]/g, '');
       currentBalance = parseFloat(cleanVal) || 0;
-      
       localStorage.setItem('vibeBalance', currentBalance);
       document.getElementById('modal').classList.add('hidden');
       loadData();
     }
 
-    function exportBackup() { alert("Backup coming soon"); }
-    function importBackup(e) { alert("Restore coming soon"); }
-    function detectAndShowInLedger() { alert("Recurring detection will be added next"); }
+    function exportBackup() { alert("Backup feature: check console for JSON."); db.transactions.toArray().then(data => console.log(JSON.stringify(data))); }
+    function importBackup(e) { alert("Restore feature coming soon"); }
 
     window.onload = () => {
       tailwind.config = { content: ["./**/*"] };
