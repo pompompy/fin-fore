@@ -16,7 +16,6 @@
     .ledger-row:hover { background-color: #18181b; }
     .prospective-row { font-style: italic; color: #bef575; transition: background 0.2s; }
     .prospective-row:hover { background-color: #1a2e0e; }
-    .btn-icon { @apply p-1 hover:bg-white/10 rounded-md transition-colors; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen">
@@ -166,13 +165,13 @@
         const debit  = row.amount < 0 ? Math.abs(row.amount).toFixed(2) : '';
         const label = row.isProspective ? '<span class="text-[10px] bg-amber-900/60 text-amber-200 px-1.5 py-0.5 rounded mr-2 uppercase font-bold">Prospective</span>' : '';
         
-        return `<tr class="${row.isProspective ? 'prospective-row cursor-pointer' : 'ledger-row'}">
-          <td class="font-medium" ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>${dateStr}</td>
-          <td class="text-right text-zinc-400" ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>$${row.beg.toFixed(2)}</td>
-          <td class="text-right text-emerald-400" ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>${credit}</td>
-          <td class="text-right text-red-400" ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>${debit}</td>
-          <td class="text-right font-semibold" ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>$${row.end.toFixed(2)}</td>
-          <td ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>${label}${row.displayNote}</td>
+        return `<tr class="${row.isProspective ? 'prospective-row' : 'ledger-row'}">
+          <td class="font-medium cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">${dateStr}</td>
+          <td class="text-right text-zinc-400 cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">$${row.beg.toFixed(2)}</td>
+          <td class="text-right text-emerald-400 cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">${credit}</td>
+          <td class="text-right text-red-400 cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">${debit}</td>
+          <td class="text-right font-semibold cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">$${row.end.toFixed(2)}</td>
+          <td class="cursor-pointer" onclick="${row.isProspective ? `editProspective(${row.id})` : ''}">${label}${row.displayNote}</td>
           <td class="text-center">
              ${row.isProspective ? `<button onclick="showAddTransactionModal(${row.date})" class="text-zinc-500 hover:text-white text-lg">⊕</button>` : ''}
           </td>
@@ -181,11 +180,24 @@
     }
 
     async function detectAndShowInLedger() {
+      console.log("--- 🕵️ Detection Started (Recent 4 Months) ---");
+      // 1. Clear old prospective items
       const old = await db.transactions.filter(t => !t.isHistorical).toArray();
       await db.transactions.bulkDelete(old.map(t => t.id));
 
-      const history = await db.transactions.filter(t => t.isHistorical == true || t.isHistorical == 1).toArray();
-      if (history.length < 2) return alert("Need more history.");
+      // 2. Define cutoff for 4 months ago
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - 4);
+      const cutoffTs = cutoff.getTime();
+
+      // 3. Query history limited to last 4 months
+      const history = await db.transactions
+        .filter(t => (t.isHistorical == true || t.isHistorical == 1) && t.date >= cutoffTs)
+        .toArray();
+      
+      console.log(`Analyzing ${history.length} historical transactions from the last 4 months.`);
+
+      if (history.length < 2) return alert("Not enough recent history to detect trends.");
 
       const groups = {};
       history.forEach(tx => {
@@ -195,15 +207,18 @@
       });
 
       const now = new Date(); now.setHours(0,0,0,0);
-      const horizon = new Date(); horizon.setDate(horizon.getDate() + 45);
+      const horizon = new Date(); horizon.setDate(horizon.getDate() + 35);
       const newProspective = [];
 
       for (const [desc, txs] of Object.entries(groups)) {
         if (txs.length < 2) continue;
         const sorted = txs.sort((a, b) => a.date - b.date);
         const lastTx = sorted[sorted.length - 1];
+        
         const intervals = [];
-        for (let i = 1; i < sorted.length; i++) intervals.push((sorted[i].date - sorted[i-1].date) / 86400000);
+        for (let i = 1; i < sorted.length; i++) {
+          intervals.push((sorted[i].date - sorted[i-1].date) / 86400000);
+        }
         const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
 
         const isMonthly = (avg >= 25 && avg <= 32);
@@ -227,7 +242,13 @@
           }
         }
       }
-      if (newProspective.length > 0) await db.transactions.bulkAdd(newProspective);
+
+      if (newProspective.length > 0) {
+        await db.transactions.bulkAdd(newProspective);
+        alert(`Found patterns for ${newProspective.length} future items based on the last 4 months.`);
+      } else {
+        alert("No recurring patterns found in recent history.");
+      }
       await loadData();
     }
 
@@ -244,12 +265,12 @@
               <input id="newDate" type="date" value="${dateStr}" class="w-full bg-zinc-800 p-3 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500">
             </div>
             <div>
-              <label class="text-xs text-zinc-400 block mb-1">Amount (Use negative for bills)</label>
+              <label class="text-xs text-zinc-400 block mb-1">Amount (Negative for bills)</label>
               <input id="newAmount" type="text" value="$0.00" class="w-full bg-zinc-800 p-3 rounded-xl outline-none" oninput="formatCurrencyInput(this)">
             </div>
             <div>
               <label class="text-xs text-zinc-400 block mb-1">Description</label>
-              <input id="newNote" type="text" placeholder="e.g. Rent, Bonus" class="w-full bg-zinc-800 p-3 rounded-xl outline-none">
+              <input id="newNote" type="text" placeholder="e.g. Rent, Groceries" class="w-full bg-zinc-800 p-3 rounded-xl outline-none">
             </div>
           </div>
           <div class="flex gap-2 mt-8">
@@ -265,7 +286,7 @@
       const date = new Date(dateVal + 'T12:00:00').getTime();
       const amountStr = document.getElementById('newAmount').value.replace(/[$,]/g, '');
       const amount = parseFloat(amountStr) || 0;
-      const description = document.getElementById('newNote').value || "Manual Transaction";
+      const description = document.getElementById('newNote').value || "Manual Entry";
 
       await db.transactions.add({
         date, amount, description, isHistorical: false, userNote: null
@@ -302,12 +323,13 @@
     async function updateTx(id) {
       const dateVal = document.getElementById('editDate').value;
       const date = new Date(dateVal + 'T12:00:00').getTime();
-      const amount = parseFloat(document.getElementById('editAmount').value.replace(/[$,]/g, ''));
+      const amountStr = document.getElementById('editAmount').value.replace(/[$,]/g, '');
+      const amount = parseFloat(amountStr);
       const userNote = document.getElementById('editNote').value;
       
       await db.transactions.update(id, { date, amount, userNote });
       document.getElementById('modal').classList.add('hidden');
-      await loadData(); // Force refresh
+      await loadData();
     }
 
     async function deleteTx(id) {
@@ -322,7 +344,7 @@
         <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4 border border-zinc-800">
           <h2 class="text-2xl mb-6">Set Current Balance</h2>
           <input id="balanceInput" type="text" value="$${currentBalance.toFixed(2)}" 
-                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-500 outline-none focus:not-italic focus:text-white"
+                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-500 outline-none"
                  oninput="formatCurrencyInput(this)">
           <div class="flex gap-3 mt-8">
             <button onclick="document.getElementById('modal').classList.add('hidden')" class="flex-1 py-4 bg-zinc-700 rounded-2xl">Cancel</button>
