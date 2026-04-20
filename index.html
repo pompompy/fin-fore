@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VibeForecast • Checkbook Ledger</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dexie@4.0.1/dist/dexie.min.js"></script>
   <style>
@@ -39,11 +38,20 @@
       <button onclick="switchTab(3)" id="tab3" class="tab-btn px-8 py-4 font-medium flex-1">📥 Import CSV</button>
     </div>
 
+    <!-- IMPORT CSV TAB (with heavy debugging) -->
+    <div id="panel3" class="tab-panel">
+      <div class="border-2 border-dashed border-zinc-700 rounded-3xl p-12 text-center">
+        <p class="text-2xl mb-4">Import Ally Transactions CSV</p>
+        <input type="file" id="csvInput" accept=".csv" class="hidden" onchange="handleCSVImport(event)">
+        <button onclick="triggerCSVImport()" class="px-10 py-5 bg-white text-zinc-950 rounded-2xl font-semibold text-lg hover:bg-emerald-400">Choose transactions.csv</button>
+        <div id="importStatus" class="mt-8 text-sm text-left max-w-md mx-auto bg-zinc-900 p-4 rounded-2xl font-mono whitespace-pre-wrap"></div>
+      </div>
+    </div>
+
     <!-- LEDGER TAB -->
-    <div id="panel0" class="tab-panel">
+    <div id="panel0" class="tab-panel hidden">
       <div class="flex justify-between items-center mb-6">
         <h2 class="text-2xl font-semibold">Checkbook Ledger</h2>
-        <button onclick="detectAndShowInLedger()" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 rounded-2xl text-sm font-medium">🔍 Detect Recurring Patterns</button>
       </div>
       <div class="overflow-x-auto rounded-3xl border border-zinc-800 bg-zinc-900">
         <table class="w-full min-w-[950px] text-sm">
@@ -59,18 +67,6 @@
           </thead>
           <tbody id="ledgerBody" class="divide-y divide-zinc-800"></tbody>
         </table>
-      </div>
-      <p class="text-xs text-zinc-500 mt-4 text-center">Future → Past • Running balances shown • Tap note to edit later</p>
-    </div>
-
-    <!-- IMPORT CSV TAB -->
-    <div id="panel3" class="tab-panel hidden">
-      <div class="border-2 border-dashed border-zinc-700 rounded-3xl p-12 text-center">
-        <p class="text-2xl mb-4">Import Ally Transactions CSV</p>
-        <input type="file" id="csvInput" accept=".csv" class="hidden" onchange="handleCSVImport(event)">
-        <button onclick="triggerCSVImport()" class="px-10 py-5 bg-white text-zinc-950 rounded-2xl font-semibold text-lg hover:bg-emerald-400">Choose transactions.csv</button>
-        <div id="importStatus" class="mt-6 text-sm min-h-[28px]"></div>
-        <p class="text-xs text-zinc-500 mt-8">From Ally → Checking → Download CSV</p>
       </div>
     </div>
   </div>
@@ -96,29 +92,49 @@
       document.getElementById('csvInput').click();
     }
 
-    // ROBUST ALLY CSV PARSER (handles spaces in headers)
     async function handleCSVImport(e) {
       const file = e.target.files[0];
-      if (!file) return;
+      if (!file) {
+        console.error("No file selected");
+        return;
+      }
 
       const status = document.getElementById('importStatus');
-      status.innerHTML = '📤 Parsing Ally CSV...';
+      status.innerHTML = `📤 Starting parse of ${file.name} (${(file.size/1024).toFixed(1)} KB)...\n`;
+
+      console.log("=== CSV Import Started ===");
+      console.log("File name:", file.name);
+      console.log("File size:", file.size);
 
       Papa.parse(file, {
         header: true,
         skipEmptyLines: true,
         complete: async function(results) {
-          const newTxs = [];
+          console.log("PapaParse complete. Rows received:", results.data.length);
+          console.log("Headers found:", results.meta.fields);
 
-          results.data.forEach(row => {
-            // Normalize keys (remove leading/trailing spaces)
+          status.innerHTML += `PapaParse found ${results.data.length} rows.\nHeaders: ${results.meta.fields ? results.meta.fields.join(', ') : 'none'}\n\n`;
+
+          const newTxs = [];
+          let validCount = 0;
+
+          results.data.forEach((row, idx) => {
+            // Normalize keys (trim spaces)
             const normalized = {};
             Object.keys(row).forEach(key => {
               const cleanKey = key.trim();
               normalized[cleanKey] = (row[key] || '').toString().trim();
             });
 
-            if (!normalized.Date || normalized.Amount === '') return;
+            const hasDate = !!normalized.Date;
+            const hasAmount = normalized.Amount !== '' && !isNaN(parseFloat(normalized.Amount));
+
+            if (idx < 5) {  // Log first few rows for debugging
+              console.log(`Row ${idx}:`, normalized);
+              status.innerHTML += `Row ${idx}: Date=${normalized.Date || 'MISSING'}, Amount=${normalized.Amount || 'MISSING'}\n`;
+            }
+
+            if (!hasDate || !hasAmount) return;
 
             let txDate = new Date(normalized.Date);
             if (normalized.Time) {
@@ -127,9 +143,7 @@
             }
 
             const amount = parseFloat(normalized.Amount);
-            if (isNaN(amount)) return;
-
-            let desc = normalized.Description || 'No description';
+            const desc = normalized.Description || 'No description';
 
             newTxs.push({
               date: txDate.getTime(),
@@ -138,34 +152,54 @@
               userNote: null,
               isHistorical: true
             });
+            validCount++;
           });
 
-          if (newTxs.length === 0) {
-            status.innerHTML = '❌ Still no valid rows. Make sure the file has columns: Date, Time, Amount, Description';
+          console.log(`Valid transactions extracted: ${validCount}`);
+
+          status.innerHTML += `\nValid transactions found: ${validCount}\n`;
+
+          if (validCount === 0) {
+            status.innerHTML += `\n❌ No valid rows. Possible causes:\n`;
+            status.innerHTML += `- Column names have unexpected spaces or quotes\n`;
+            status.innerHTML += `- Amount column not recognized\n`;
+            status.innerHTML += `- File is not a standard Ally CSV\n\n`;
+            status.innerHTML += `Check the console (F12) for detailed row output.`;
             return;
           }
 
-          await db.transactions.bulkAdd(newTxs);
-          status.innerHTML = `✅ Successfully imported ${newTxs.length} transactions!`;
-          await loadData();
-          setTimeout(() => switchTab(0), 1400);
+          try {
+            await db.transactions.clear(); // Optional: clear old data for clean test
+            await db.transactions.bulkAdd(newTxs);
+            status.innerHTML += `✅ SUCCESS! Imported ${validCount} transactions.\nSwitching to Ledger...`;
+            await loadData();
+            setTimeout(() => switchTab(0), 1500);
+          } catch (err) {
+            console.error("Save error:", err);
+            status.innerHTML += `❌ Error saving to database: ${err.message}`;
+          }
+        },
+        error: function(err) {
+          console.error("PapaParse error:", err);
+          status.innerHTML += `❌ PapaParse failed: ${err}`;
         }
       });
     }
 
     async function loadData() {
-      document.getElementById('balanceDisplay') && (document.getElementById('balanceDisplay').textContent = '$' + currentBalance.toFixed(2));
       await renderLedger();
     }
 
     async function renderLedger() {
       const txs = await db.transactions.toArray();
+      const tbody = document.getElementById('ledgerBody');
+      
       if (txs.length === 0) {
-        document.getElementById('ledgerBody').innerHTML = `<tr><td colspan="6" class="text-center py-12 text-zinc-400">No transactions yet — import your Ally CSV first</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center py-12 text-zinc-400">No transactions loaded yet</td></tr>`;
         return;
       }
 
-      const sorted = txs.sort((a,b) => a.date - b.date);
+      const sorted = [...txs].sort((a,b) => a.date - b.date);
       let running = currentBalance;
       const balanceMap = new Map();
       sorted.forEach(tx => {
@@ -180,7 +214,6 @@
         return {...tx, beg: b.beg, end: b.end, displayNote: note};
       }).sort((a,b) => b.date - a.date);
 
-      const tbody = document.getElementById('ledgerBody');
       tbody.innerHTML = displayRows.map(row => {
         const d = new Date(row.date);
         const dateStr = d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) +
@@ -191,7 +224,7 @@
 
         return `
           <tr class="ledger-row">
-            <td class="font-medium">${dateStr}</td>
+            <td>${dateStr}</td>
             <td class="text-right">$${row.beg.toFixed(2)}</td>
             <td class="text-right text-emerald-400">${credit}</td>
             <td class="text-right text-red-400">${debit}</td>
@@ -201,15 +234,12 @@
       }).join('');
     }
 
-    function exportBackup() { alert("Backup feature ready — will be expanded soon"); }
-    function importBackup(e) { alert("Restore ready"); }
-    function detectAndShowInLedger() { alert("Recurring detection coming next"); renderLedger(); }
+    function exportBackup() { alert("Backup coming soon"); }
+    function importBackup(e) { alert("Restore coming soon"); }
 
-    // Start the app
     window.onload = () => {
       tailwind.config = { content: ["./**/*"] };
-      loadData();
-      switchTab(3);   // Open Import tab first
+      switchTab(3);   // Start on Import tab
     };
   </script>
 </body>
