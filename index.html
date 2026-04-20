@@ -14,7 +14,8 @@
     th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
     tr { border-bottom: 1px solid #27272a; }
     .ledger-row:hover { background-color: #18181b; }
-    .prospective-row { font-style: italic; color: #bef575; cursor: pointer; }
+    /* Prospective row styling */
+    .prospective-row { font-style: italic; color: #bef575; cursor: pointer; transition: background 0.2s; }
     .prospective-row:hover { background-color: #1a2e0e; }
   </style>
 </head>
@@ -23,7 +24,7 @@
   <div class="max-w-6xl mx-auto p-4">
     <div class="flex justify-between items-center mb-8">
       <h1 class="text-3xl font-bold flex items-center gap-2">
-        <span class="text-emerald-400">📒</span> Fin-Fore simple personal finance forecaster
+        <span class="text-emerald-400">📒</span> Fin-Fore Ledger
       </h1>
       <div class="flex gap-3">
         <button onclick="showSetBalanceModal()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm">Set Current Balance</button>
@@ -35,7 +36,6 @@
 
     <div class="flex border-b border-zinc-800 mb-6 text-sm">
       <button onclick="switchTab(0)" id="tab0" class="tab-btn active px-8 py-4 font-medium flex-1">📒 Ledger</button>
-      <button onclick="switchTab(1)" id="tab1" class="tab-btn px-8 py-4 font-medium flex-1">📈 Forecast</button>
       <button onclick="switchTab(3)" id="tab3" class="tab-btn px-8 py-4 font-medium flex-1">📥 Import CSV</button>
     </div>
 
@@ -52,10 +52,10 @@
           <thead class="bg-zinc-950 sticky top-0">
             <tr class="text-zinc-400 text-xs uppercase tracking-widest">
               <th class="w-48">Date</th>
-              <th class="text-right w-32">Beginning Balance</th>
+              <th class="text-right w-32">Beg. Balance</th>
               <th class="text-right w-28">Credit</th>
               <th class="text-right w-28">Debit</th>
-              <th class="text-right w-32">Ending Balance</th>
+              <th class="text-right w-32">End. Balance</th>
               <th>Note</th>
             </tr>
           </thead>
@@ -74,14 +74,18 @@
     </div>
   </div>
 
-  <div id="modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50"></div>
+  <div id="modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50"></div>
 
   <script>
+    // 1. DATABASE SETUP
     const db = new Dexie('VibeForecastDB');
-    db.version(2).stores({ transactions: '++id, date, amount, description, isHistorical, userNote' });
+    db.version(2).stores({ 
+      transactions: '++id, date, amount, description, isHistorical, userNote' 
+    });
 
     let currentBalance = parseFloat(localStorage.getItem('vibeBalance')) || 0;
 
+    // 2. UI TABS
     function switchTab(n) {
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
       document.getElementById('panel' + n).classList.remove('hidden');
@@ -90,62 +94,35 @@
       if (n === 0) renderLedger();
     }
 
-    function triggerCSVImport() {
-      document.getElementById('importStatus').innerHTML = '';
-      document.getElementById('csvInput').click();
-    }
-
+    // 3. DATA IMPORT
     async function handleCSVImport(e) {
       const file = e.target.files[0];
       if (!file) return;
-
-      const status = document.getElementById('importStatus');
-      status.innerHTML = '📤 Parsing Ally CSV...';
-
       Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
+        header: true, skipEmptyLines: true,
         complete: async function(results) {
-          const newTxs = [];
-          results.data.forEach(row => {
+          const newTxs = results.data.map(row => {
             const normalized = {};
             Object.keys(row).forEach(k => normalized[k.trim()] = (row[k] || '').toString().trim());
-
-            if (!normalized.Date || normalized.Amount === '') return;
-
+            if (!normalized.Date || normalized.Amount === '') return null;
             let txDate = new Date(normalized.Date);
-            if (normalized.Time) {
-              const parts = normalized.Time.split(':');
-              txDate.setHours(parseInt(parts[0])||0, parseInt(parts[1])||0, parseInt(parts[2])||0);
-            }
-
-            const amount = parseFloat(normalized.Amount);
-            if (isNaN(amount)) return;
-
-            const desc = normalized.Description || 'No description';
-
-            newTxs.push({
+            return {
               date: txDate.getTime(),
-              amount: amount,
-              description: desc,
+              amount: parseFloat(normalized.Amount),
+              description: normalized.Description || 'No description',
               userNote: null,
               isHistorical: true
-            });
-          });
-
-          if (newTxs.length === 0) {
-            status.innerHTML = '❌ No valid rows found.';
-            return;
-          }
-
+            };
+          }).filter(x => x && !isNaN(x.amount));
           await db.transactions.bulkAdd(newTxs);
-          status.innerHTML = `✅ Imported ${newTxs.length} transactions!`;
+          document.getElementById('importStatus').innerHTML = `✅ Imported ${newTxs.length} transactions!`;
           await loadData();
-          setTimeout(() => switchTab(0), 1200);
+          setTimeout(() => switchTab(0), 1000);
         }
       });
     }
 
+    // 4. LEDGER RENDERING
     async function loadData() {
       document.getElementById('currentBalanceDisplay').innerHTML = `Current Balance: <span class="font-bold">$${currentBalance.toFixed(2)}</span>`;
       await renderLedger();
@@ -153,171 +130,161 @@
 
     async function renderLedger() {
       const allTxs = await db.transactions.toArray();
-      if (allTxs.length === 0) {
-        document.getElementById('ledgerBody').innerHTML = `<tr><td colspan="6" class="text-center py-12 text-zinc-400">Import your Ally CSV to see the ledger</td></tr>`;
-        return;
-      }
-
-      const sorted = [...allTxs].sort((a, b) => a.date - b.date);
+      // Sort Chronologically for balance calc
+      const sorted = allTxs.sort((a, b) => a.date - b.date);
+      
       let running = currentBalance;
       const now = Date.now();
+      
+      // Calculate historical anchor point
       const pastTxs = sorted.filter(tx => tx.date < now);
       pastTxs.forEach(tx => running -= tx.amount);
 
       let balanceMap = new Map();
       let currentRunning = running;
-
       sorted.forEach(tx => {
         const beg = currentRunning;
         currentRunning += tx.amount;
         balanceMap.set(tx.id, {beg, end: currentRunning});
       });
 
+      // Prepare for display (Reverse Chronological)
       const displayRows = sorted.map(tx => {
         const bals = balanceMap.get(tx.id);
-        const note = (tx.userNote || tx.description).split('~ Future Amount')[0].trim();
+        const note = (tx.userNote || tx.description).split('~')[0].trim();
         return {...tx, beg: bals.beg, end: bals.end, displayNote: note, isProspective: !tx.isHistorical};
       }).sort((a, b) => b.date - a.date);
 
       const tbody = document.getElementById('ledgerBody');
+      if (displayRows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center py-20 text-zinc-500">No data. Import CSV to start.</td></tr>';
+        return;
+      }
+
       tbody.innerHTML = displayRows.map(row => {
         const d = new Date(row.date);
-        const dateStr = d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) +
-                        (d.getHours() ? ' ' + d.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'}) : '');
-
+        const dateStr = d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
         const credit = row.amount > 0 ? row.amount.toFixed(2) : '';
         const debit  = row.amount < 0 ? Math.abs(row.amount).toFixed(2) : '';
-
-        const rowClass = row.isProspective ? 'prospective-row' : 'ledger-row';
-        const clickAttr = row.isProspective ? `onclick="editProspective(${row.id})"` : '';
-        const label = row.isProspective ? '<span class="text-[10px] bg-amber-900/40 text-amber-200 px-1.5 py-0.5 rounded mr-2 uppercase tracking-tighter">Prospective (Click to edit)</span>' : '';
-
-        return `
-          <tr class="${rowClass}" ${clickAttr}>
-            <td class="font-medium">${dateStr}</td>
-            <td class="text-right">$${row.beg.toFixed(2)}</td>
-            <td class="text-right text-emerald-400">${credit}</td>
-            <td class="text-right text-red-400">${debit}</td>
-            <td class="text-right font-medium">$${row.end.toFixed(2)}</td>
-            <td>${label}${row.displayNote}</td>
-          </tr>`;
+        const label = row.isProspective ? '<span class="text-[10px] bg-amber-900/60 text-amber-200 px-1.5 py-0.5 rounded mr-2 uppercase">Prospective</span>' : '';
+        
+        return `<tr class="${row.isProspective ? 'prospective-row' : 'ledger-row'}" 
+                    ${row.isProspective ? `onclick="editProspective(${row.id})"` : ''}>
+          <td class="font-medium">${dateStr}</td>
+          <td class="text-right text-zinc-400">$${row.beg.toFixed(2)}</td>
+          <td class="text-right text-emerald-400">${credit}</td>
+          <td class="text-right text-red-400">${debit}</td>
+          <td class="text-right font-semibold">$${row.end.toFixed(2)}</td>
+          <td>${label}${row.displayNote}</td>
+        </tr>`;
       }).join('');
     }
 
+    // 5. DETECTION ENGINE
     async function detectAndShowInLedger() {
-      console.log("--- Starting Detection Cycle ---");
-      const history = await db.transactions.where('isHistorical').equals(1).toArray();
-      const groups = {};
+      console.log("--- Starting Detection ---");
+      // Clear old prospective
+      const old = await db.transactions.filter(t => !t.isHistorical).toArray();
+      await db.transactions.bulkDelete(old.map(t => t.id));
+
+      // Query for historical (checks both boolean and 0/1)
+      const history = await db.transactions.filter(t => t.isHistorical == true || t.isHistorical == 1).toArray();
       
-      // Better cleaning of descriptions
+      if (history.length < 2) {
+        alert("Not enough history to detect trends.");
+        return;
+      }
+
+      const groups = {};
       history.forEach(tx => {
-        let cleanDesc = tx.description.split('~')[0].replace(/\d{4,}/g, 'X').trim();
-        if (!groups[cleanDesc]) groups[cleanDesc] = [];
-        groups[cleanDesc].push(tx);
+        // Clean description of IDs/Dates
+        let clean = tx.description.split('~')[0].replace(/\d{4,}/g, 'X').trim();
+        if (!groups[clean]) groups[clean] = [];
+        groups[clean].push(tx);
       });
 
+      let foundCount = 0;
       const now = new Date();
-      const horizon = new Date();
-      horizon.setDate(horizon.getDate() + 45); 
-      
+      const horizon = new Date(); horizon.setDate(horizon.getDate() + 35);
       const newProspective = [];
 
       for (const [desc, txs] of Object.entries(groups)) {
         if (txs.length < 2) continue;
-
         const sorted = txs.sort((a, b) => a.date - b.date);
+        const lastTx = sorted[sorted.length - 1];
         
-        // Calculate intervals
-        let intervals = [];
+        // Calculate Intervals
+        const intervals = [];
         for (let i = 1; i < sorted.length; i++) {
           intervals.push((sorted[i].date - sorted[i-1].date) / (1000 * 60 * 60 * 24));
         }
-        
         const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-        const lastTx = sorted[sorted.length - 1];
-        const lastDate = new Date(lastTx.date);
 
-        console.log(`Analyzing: "${desc}" | Instances: ${txs.length} | Avg Interval: ${avg.toFixed(1)} days`);
+        // Pattern Logic
+        const days = sorted.map(t => new Date(t.date).getDate());
+        const isMonthly = (avg >= 25 && avg <= 32);
+        const isBiWeekly = (avg >= 13 && avg <= 15);
+        const isWeekly = (avg >= 6 && avg <= 8);
 
-        let patternFound = false;
-        let intervalDays = 0;
-
-        // 1. Monthly Date-of-Month Logic (the "5th of the month" rule)
-        const daysOfMonths = sorted.map(t => new Date(t.date).getDate());
-        const uniqueDays = [...new Set(daysOfMonths)];
-        const isMonthlySameDay = uniqueDays.length <= 2 && avg > 25; // Tolerance for weekend shifts
-
-        if (isMonthlySameDay) {
-          console.log(`  -> Detected Monthly Pattern (Day of month: ${uniqueDays})`);
-          intervalDays = "MONTHLY";
-          patternFound = true;
-        } 
-        else if (avg >= 12 && avg <= 16) { intervalDays = 14; patternFound = true; }
-        else if (avg >= 6 && avg <= 8) { intervalDays = 7; patternFound = true; }
-
-        if (patternFound) {
+        if (isMonthly || isBiWeekly || isWeekly) {
+          console.log(`Match: ${desc} (Avg: ${avg.toFixed(1)} days)`);
+          foundCount++;
           let nextDate = new Date(lastTx.date);
           while (nextDate.getTime() <= horizon.getTime()) {
-            if (intervalDays === "MONTHLY") {
+            if (isMonthly) {
               nextDate.setMonth(nextDate.getMonth() + 1);
-              // Ensure we stick to the preferred day if month lengths differ
-              nextDate.setDate(uniqueDays[0]);
+              nextDate.setDate(days[0]); // Target same day of month
             } else {
-              nextDate.setDate(nextDate.getDate() + intervalDays);
+              nextDate.setDate(nextDate.getDate() + (isBiWeekly ? 14 : 7));
             }
-
             if (nextDate.getTime() > now.getTime() && nextDate.getTime() <= horizon.getTime()) {
               newProspective.push({
                 date: nextDate.getTime(),
                 amount: lastTx.amount,
                 description: desc,
-                userNote: null,
                 isHistorical: false
               });
             }
           }
         }
-      }
+       group[desc]}
 
       if (newProspective.length > 0) {
         await db.transactions.bulkAdd(newProspective);
-        alert(`Added ${newProspective.length} transactions based on trends.`);
+        alert(`Detected ${foundCount} recurring patterns. Added ${newProspective.length} future items.`);
       } else {
-        alert("Check console (F12) for trend analysis log.");
+        alert("No clear patterns found. Try importing more history.");
       }
       await loadData();
     }
 
+    // 6. PROSPECTIVE EDITING
     async function editProspective(id) {
       const tx = await db.transactions.get(id);
-      if (!tx) return;
-
-      const dateStr = new Date(tx.date).toISOString().split('T')[0];
       const modal = document.getElementById('modal');
+      const dateVal = new Date(tx.date).toISOString().split('T')[0];
       
       modal.innerHTML = `
-        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4 border border-zinc-700">
-          <h2 class="text-xl font-bold mb-4">Edit Prospective Item</h2>
+        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm border border-zinc-700 shadow-2xl">
+          <h2 class="text-xl font-bold mb-6">Edit Prospective Item</h2>
           <div class="space-y-4">
             <div>
-              <label class="text-xs text-zinc-400 block mb-1">Date</label>
-              <input id="editDate" type="date" value="${dateStr}" class="w-full bg-zinc-800 p-3 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500">
+              <label class="text-xs text-zinc-400 block mb-1">Due Date</label>
+              <input id="editDate" type="date" value="${dateVal}" class="w-full bg-zinc-800 p-3 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500">
             </div>
             <div>
               <label class="text-xs text-zinc-400 block mb-1">Amount</label>
-              <input id="editAmount" type="text" value="$${tx.amount.toFixed(2)}" 
-                     class="w-full bg-zinc-800 p-3 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
-                     oninput="formatCurrencyInput(this)">
+              <input id="editAmount" type="text" value="$${tx.amount.toFixed(2)}" class="w-full bg-zinc-800 p-3 rounded-xl outline-none" oninput="formatCurrencyInput(this)">
             </div>
             <div>
-              <label class="text-xs text-zinc-400 block mb-1">Note</label>
+              <label class="text-xs text-zinc-400 block mb-1">Description</label>
               <input id="editNote" type="text" value="${tx.userNote || tx.description}" class="w-full bg-zinc-800 p-3 rounded-xl outline-none">
             </div>
           </div>
-          <div class="flex flex-col gap-2 mt-6">
-            <button onclick="updateTx(${id})" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold">Save Changes</button>
+          <div class="flex flex-col gap-2 mt-8">
+            <button onclick="updateTx(${id})" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold">Update Ledger</button>
             <div class="flex gap-2">
-              <button onclick="deleteTx(${id})" class="flex-1 py-3 bg-red-900/50 hover:bg-red-800 text-red-200 rounded-xl">Discard</button>
+              <button onclick="deleteTx(${id})" class="flex-1 py-3 bg-red-900/30 text-red-400 rounded-xl hover:bg-red-900/50">Discard</button>
               <button onclick="document.getElementById('modal').classList.add('hidden')" class="flex-1 py-3 bg-zinc-700 rounded-xl">Cancel</button>
             </div>
           </div>
@@ -327,35 +294,32 @@
 
     async function updateTx(id) {
       const date = new Date(document.getElementById('editDate').value).getTime();
-      const amountStr = document.getElementById('editAmount').value.replace(/[$,]/g, '');
-      const amount = parseFloat(amountStr);
+      const amount = parseFloat(document.getElementById('editAmount').value.replace(/[$,]/g, ''));
       const userNote = document.getElementById('editNote').value;
-
       await db.transactions.update(id, { date, amount, userNote });
       document.getElementById('modal').classList.add('hidden');
       await loadData();
     }
 
     async function deleteTx(id) {
-      if(confirm("Remove this prospective transaction?")) {
-        await db.transactions.delete(id);
-        document.getElementById('modal').classList.add('hidden');
-        await loadData();
-      }
+      await db.transactions.delete(id);
+      document.getElementById('modal').classList.add('hidden');
+      await loadData();
     }
 
+    // 7. BALANCE SETTING (With Calculator Logic)
     function showSetBalanceModal() {
       const modal = document.getElementById('modal');
-      const val = currentBalance > 0 ? `$${currentBalance.toFixed(2)}` : '$0.00';
+      const val = `$${currentBalance.toFixed(2)}`;
       modal.innerHTML = `
-        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4">
+        <div class="bg-zinc-900 rounded-3xl p-8 w-full max-w-sm mx-4 border border-zinc-800">
           <h2 class="text-2xl mb-6">Set Current Balance</h2>
           <input id="balanceInput" type="text" value="${val}" 
-                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-500 outline-none"
+                 class="w-full bg-zinc-800 text-4xl text-center py-6 rounded-2xl italic text-zinc-500 outline-none focus:not-italic focus:text-white"
                  oninput="formatCurrencyInput(this)" onfocus="if(this.value==='$0.00') this.value=''">
           <div class="flex gap-3 mt-8">
             <button onclick="document.getElementById('modal').classList.add('hidden')" class="flex-1 py-4 bg-zinc-700 rounded-2xl">Cancel</button>
-            <button onclick="saveCurrentBalance()" class="flex-1 py-4 bg-emerald-500 rounded-2xl">Save</button>
+            <button onclick="saveCurrentBalance()" class="flex-1 py-4 bg-emerald-500 rounded-2xl font-bold">Save & Refresh</button>
           </div>
         </div>`;
       modal.classList.remove('hidden');
@@ -363,23 +327,24 @@
 
     function formatCurrencyInput(input) {
       let digits = input.value.replace(/[^\d-]/g, '');
-      if (digits === '' || digits === '-') return;
-      let numericValue = (parseInt(digits) / 100).toFixed(2);
-      input.value = `$${numericValue}`;
+      if (!digits || digits === '-') return;
+      input.value = `$${(parseInt(digits) / 100).toFixed(2)}`;
       input.classList.remove('italic', 'text-zinc-500');
     }
 
     function saveCurrentBalance() {
-      currentBalance = parseFloat(document.getElementById('balanceInput').value.replace(/[$,]/g, '')) || 0;
+      const str = document.getElementById('balanceInput').value.replace(/[$,]/g, '');
+      currentBalance = parseFloat(str) || 0;
       localStorage.setItem('vibeBalance', currentBalance);
       document.getElementById('modal').classList.add('hidden');
       loadData();
     }
 
+    // UTILS
+    function triggerCSVImport() { document.getElementById('csvInput').click(); }
     function exportBackup() { db.transactions.toArray().then(d => {
       const blob = new Blob([JSON.stringify(d)], {type:'application/json'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href=url; a.download='ledger_backup.json'; a.click();
+      const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='ledger.json'; a.click();
     });}
 
     window.onload = () => { loadData(); switchTab(0); };
